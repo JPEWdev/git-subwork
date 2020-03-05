@@ -1,0 +1,91 @@
+#! /usr/bin/env python3
+
+import argparse
+import os
+import subprocess
+import sys
+
+def capture(*args, **kwargs):
+    return subprocess.run(*args, **kwargs, stdout=subprocess.PIPE, encoding='utf-8').stdout
+
+def get_submodules():
+    submodules = {}
+
+    c = capture(['git', 'config', '--get-regex', '^submodule\.'], check=True)
+    for l in c.splitlines():
+        var, val = l.split(maxsplit=1)
+        path, name = var.split('.', 1)[1].rsplit('.', 1)
+
+        submodules.setdefault(path, {})[name] = val
+
+    return submodules
+
+def get_topdir():
+    return capture(['git', 'rev-parse', '--show-toplevel'], check=True).rstrip()
+
+def main():
+    def init(args):
+        return subprocess.run(['git', 'submodule', 'init', '--'] + args.path).returncode
+
+    def deinit(args):
+        cmd = ['git', 'submodule', 'deinit']
+        if args.force:
+            cmd.append('--force')
+        if args.all:
+            cmd.append('--all')
+        cmd.append('--')
+        cmd.extend(args.path)
+        return subprocess.run(cmd).returncode
+
+    def update(args):
+        if args.init:
+            subprocess.run(['git', 'submodule', 'init', '--'] + args.path, check=True)
+
+        subwork_modules = {k: v for k, v in get_submodules().items() if v['url'] == '.' and (not args.path or k in args.path)}
+
+        topdir = get_topdir()
+
+        for k, v in subwork_modules.items():
+            if os.path.exists(os.path.join(topdir, k, '.git')):
+                continue
+
+            info = capture(['git', 'ls-files', '--stage', '--', k], check=True).rstrip()
+            _, ref, _ = info.split(maxsplit=2)
+            subprocess.run(['git', 'worktree', 'add', os.path.join(topdir, k), ref], check=True)
+
+        subprocess.run(['git', 'submodule', 'update', '--'] + args.path, check=True)
+
+    parser = argparse.ArgumentParser(description="Submodules as subtrees")
+
+    subparsers = parser.add_subparsers(description='command')
+
+    init_parser = subparsers.add_parser('init', help="Initialize submodules as worktrees")
+    init_parser.add_argument('path', nargs='*', help="Path(s) to initialize")
+    init_parser.set_defaults(func=init)
+
+    deinit_parser = subparsers.add_parser('deinit', help="Deinitialize submodules as worktrees")
+    deinit_parser.add_argument('-f', '--force', action='store_true', help="Force deinitialization")
+    deinit_parser.add_argument('--all', action='store_true', help="Deinitialize all submodules")
+    deinit_parser.add_argument('path', nargs='*', help="Path(s) to deinitialize")
+    deinit_parser.set_defaults(func=deinit)
+
+    update_parser = subparsers.add_parser('update', help="Update submodules as worktrees")
+    update_parser.add_argument('--init', action='store_true', help='Initialize prior to update')
+    update_parser.add_argument('path', nargs='*', help='Path(s) to update')
+    update_parser.set_defaults(func=update)
+
+    args = parser.parse_args()
+
+    try:
+        func = args.func
+    except AttributeError:
+        print("Subcommand missing")
+        parser.print_help()
+        return 1
+
+    return func(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+
